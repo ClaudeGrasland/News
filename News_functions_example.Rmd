@@ -1,0 +1,609 @@
+---
+title: "News Flow Functions revised"
+author: "Claude Grasland"
+date: "10 June 2020"
+output: html_notebook
+---
+
+```{r}
+library(quanteda)
+library(tidytext)
+library(dplyr)
+```
+
+
+## Introduction
+
+Due to the modification of the structure of data in quanteda version 2, it has been necessary to revised the workflow previously established for the analyis of media flow. This notebook present and test the new set of functions.
+
+
+
+
+# A. IMPORTATION
+
+
+## General function (**nf_input**)
+
+We have to distinguish between different cases
+
+- Data directly collected from Mediacloud website, with only title
+- Data sent by MIT Civic Center : extraction from Mediacloud with title and description frommarch 2013 to December 2019 for 261 daily newspapers
+- other data from factiva, Europresse, Twitter, ...
+
+Therefore we have to build a generic function able to support different data format and we let the user responsible from the preparation of data (fusion of title and description, etc...). 
+
+We assume therefore that the user has prepared a dataframe with at lss one column of text and one column of date
+
+
+### function
+
+```{r,echo=TRUE}
+
+#### ---------------- nf_input -----------------
+
+#' @title Input data to quanteda
+#' @name nf_input
+#' @description Convert  dataframe to quanteda format
+#' @param source a dataframe
+#' @param textfield a column with text
+#' @param timefield a column with time
+#' @param lang add a language ("en","fr", ...) 
+#' @param country add a country in ISO3 format
+#' @param source a media name (6 char maxi without blanks)
+
+nf_input <-   function(    data = "df",
+                           textfield = "text",
+                           timefield = "time",
+                           lang = "en",
+                           country = "GBR",
+                           source = "Guardi")
+{
+  # Recode
+  text<-data[,textfield]
+  time<-as.POSIXct(data[,timefield])
+
+  # transfom in quanteda format
+  qd<-quanteda::corpus(x = text)
+  
+  # add metadata
+  qd$time<-as.POSIXct(data[,timefield])
+  qd$lang<-lang
+  qd$country<-country
+  qd$source<-source
+
+  return(qd)
+}
+
+```
+
+### application
+
+```{r}
+
+mediacloud<-"/data/user/g/cgrasland/mediacloud/"
+# Importation of data
+df<-read.csv(file = paste(mediacloud,"raw/samp.csv", sep=""), sep=",", header=T, encoding="UTF-8")
+
+# Preparation of textfield (e.g. fusion of title  + description)
+df$news<-paste(df$title, df$description, sep=". ")
+
+# Importation to quanteda format
+qd<-nf_input(data = df,
+             textfield = "news",
+             timefield = "publish_date",
+             lang = "fr",
+             country = "FRA",
+             source = "lmonde"
+             )
+summary(qd,2)
+head(qd,2)
+str(qd)
+```
+
+
+# B. TOKENIZATION
+
+We consider this part as very specific and subject of variations. What we propose is just a set of empirical solutions
+
+
+## B.1 eliminate accent and convert to ascii (**unaccent**)
+
+### function
+```{r}
+#### ---------------- unaccent-----------------
+#' @title Remove accent end convert to ascii
+#' @name unaccent
+#' @description Remove accent and convert  texte to ascii - Merci pour la fonction à Alexandre Hobeika, https://data.hypotheses.org/564
+#' @param text a text
+
+unaccent <- function(text) {
+  text <- gsub("['`^~\"]", " ", text)
+  text <- iconv(text, from="UTF-8", to="ASCII//TRANSLIT//IGNORE")
+#  text <- iconv(text, to="ASCII//TRANSLIT//IGNORE")
+  text <- gsub("['`^~\"]", "", text)
+  return(text)
+}
+
+```
+
+### application
+```{r}
+qd2<-unaccent(qd)
+head(qd,2)
+head(qd2,2)
+```
+
+
+## B.2 Tokenize (**tok_news**)
+
+More general function with many options
+
+### function
+```{r}
+#### ---------------- tok_news-----------------
+#' @title Tranfrom a qd object in token
+#' @name tok_news
+#' @description tokenize news with specific options
+#' @param qd a corpus of news (quanteda format)
+#' @param to_lower transform in lower case (default = TRUE)
+#' @param keep_acro keep acronyms like US, OTAN ... in upper case (default = FALSE)
+#' @param rem_punct remove punctuations (default = TRUE)
+#' @param rem_stop remove stopwords (default = FALSE)
+#' @param lang choose language (default = "en")
+#' @param ascii remove accents (default = TRUE)
+
+
+tok_news<-function(qd,lang="en", to_lower=T, keep_acro=F,rem_punct=T,rem_stop=F,ascii=T)
+{
+  unaccent <- function(text) {
+  text <- gsub("['`^~\"]", " ", text)
+  text <- iconv(text, from="UTF-8", to="ASCII//TRANSLIT//IGNORE")
+#  text <- iconv(text, to="ASCII//TRANSLIT//IGNORE")
+  text <- gsub("['`^~\"]", "", text)
+  return(text)
+}
+  
+  if (ascii ==T) {qd<-unaccent(qd)}
+  if (to_lower){
+    if (rem_stop){
+      tok<-tokens_remove(tokens(char_tolower(qd,keep_acronyms = keep_acro), remove_punct =rem_punct),stopwords(lang))}
+    else {
+      tok<-tokens_remove(tokens(char_tolower(qd,keep_acronyms = keep_acro), remove_punct = rem_punct))}
+  }
+  else {  if (rem_stop){
+    tok<-tokens_remove(tokens(qd,remove_punct=rem_punct),stopwords(lang))}
+    else {
+      tok<-tokens_remove(tokens(qd, remove_punct = rem_punct))}
+  }
+  return(tok)
+}
+```
+
+### application
+```{r}
+tok<-tok_news(qd=qd,
+              lang="fr",
+              to_lower=T,
+              keep_acro=T,
+              rem_punct=T,
+              rem_stop=T,
+              ascii=T)
+
+head(qd,2)
+head(tok,2)
+
+
+```
+
+
+# C. TAGS
+
+Tagging is based on a dictionnary which is supposed here to derive from a textfile with specific format. The dictionnary involve all the parameters used for tokenization.
+
+## C.1 Create  a dictionnary (**nf_dico**)
+
+### Function
+```{r}
+
+#### ---------------- nf_dico-----------------
+#' @title Create a dictionnary with associated parameters of tokenization 
+#' @name nf_dico
+#' @description 
+#' @param dic a dataframe containing columns tag, word and lang
+#' @param to_lower transform in lower case (default = TRUE)
+#' @param keep_acro keep acronyms like US, OTAN ... in upper case (default = FALSE)
+#' @param rem_punct remove punctuations (default = TRUE)
+#' @param rem_stop remove stopwords (default = FALSE)
+#' @param lang choose language (default = "en")
+#' @param ascii remove accents (default = TRUE)
+#' @param style type of keyword (default = "glob", otherwise "regexp")
+
+
+nf_dico <- function(dic = dic,
+                    to_lower=T,
+                    keep_acro = F,
+                    rem_punct = T,
+                    rem_stop = F,
+                    lang="en",
+                    ascii =T,
+                    style ="glob")
+  {
+  
+  
+  unaccent <- function(text) {
+  text <- gsub("['`^~\"]", " ", text)
+  text <- iconv(text, from="UTF-8", to="ASCII//TRANSLIT//IGNORE")
+#  text <- iconv(text, to="ASCII//TRANSLIT//IGNORE")
+  text <- gsub("['`^~\"]", "", text)
+  return(text)
+}
+  
+  
+  
+   # Load and select keywords
+  dic<-dic[dic$lang==lang,]
+  dic<-dic[,c("word","tag")]
+  if(to_lower) {dic$word<-tolower(dic$word)}
+  if(ascii) {dic$word<-unaccent(dic$word)}
+  ##### Code pas joli joli ... ####
+  names(dic)<-c("word","sentiment")
+ 
+  tags<-quanteda::as.dictionary(dic)
+  ####################################
+  dico<-list()
+  dico$tags      <- tags
+  dico$to_lower  <- to_lower
+  dico$keep_acro <- keep_acro
+  dico$rem_punct <- rem_punct
+  dico$rem_stop  <- rem_stop
+  dico$lang      <- lang
+  dico$ascii  <- ascii
+  dico$style     <- style
+  return(dico)
+}
+
+```
+
+
+### application
+
+```{r}
+# Load dictionnary
+state<-read.csv("dico/keywords_state_jan_2020.csv", sep=";", header=T, stringsAsFactors = F)
+border<-read.csv("dico/keywords_border.csv", sep=";", header=T, stringsAsFactors = F)
+
+# Create quanteda dictionnary
+dico_state_fr<-nf_dico(dic = state,
+                    to_lower=T,
+                    keep_acro = F,
+                    rem_punct = T,
+                    rem_stop = F,
+                    lang="fr",
+                    ascii =T,
+                    style ="glob")
+
+dico_border_fr<-nf_dico(dic = border,
+                    to_lower=T,
+                    keep_acro = F,
+                    rem_punct = T,
+                    rem_stop = F,
+                    lang="fr",
+                    ascii =T,
+                    style ="glob")
+```
+
+
+## C.2 Tag a corpus (**nf_tag**)
+
+
+We can now realize the operation of tagging and add the results to the quanteda object as information fields. They are only two parameters : the name of the dictionnary and the name of the resulting tag.
+
+### function
+```{r}
+#' @title create the list of tag found in each text of a corpus
+#' @name nf_tag
+#' @description apply a dictionnary to the documents and create list of tags found
+#' @param news a corpus of news (in quanteda format)
+#' @param dico a dictionnary (created by nf_dico)
+#' @param tagname the name of the tag)
+
+
+
+nf_tag<-function(news = corpus,
+                 dico = dico, 
+                 tagname="tag")
+{
+  
+  # Tokenize
+  tok<-tok_news(news,lang=dico$lang, to_lower=dico$to_lower,           keep_acro=dico$keep_acro,rem_punct=dico$rem_punct,rem_stop=dico$rem_stop, ascii=dico$ascii)
+  
+  # Search tags
+  tok<-tokens_select(tok,dico$tags, valuetype = dico$style, case_insensitive = F)
+  tok<-tokens_lookup(tok,dico$tags,valuetype = dico$style, case_insensitive = F)
+  collage<-function (x) {paste(x, collapse=" ")}
+  x<-lapply(tok, FUN=collage)
+  m<-as.character(as.matrix(x,ncol=1))
+
+  
+  # Add results to quanteda object
+  docvars(news)[,paste(tagname,"test",sep="_")]<-m!=""
+  docvars(news)[,paste(tagname,"list",sep="_")]<-m
+
+  
+  return(news)
+
+}
+
+```
+
+
+### application
+```{r}
+qd_state<-nf_tag(news = qd,
+                 dic = dico_state_fr, 
+                 tagname ="state")
+qd_state_border<-nf_tag(news = qd_state,
+                 dic = dico_border_fr, 
+                 tagname ="border")
+summary(qd_state_border,3)
+table(qd_state_border$border_test)
+```
+
+
+# D. AGREGATION 
+
+
+The lists of tags can be used for the production of cube, hypercubes or pentacubes under various hypothesis. The general principe is to produce an array object where the total sum is equal to the number of news. 
+
+
+## D.1 Creation of cubes (**nf_cube**)
+
+Cubes introduce two compulsory dimensions (who and when) with a third dimension (what). The dimension when can be adapted by day, week, month, quarter or year
+
+### function
+```{r}
+#### ---------------- nf_cube ----------------
+#' @title cross four dimensions of news tags
+#' @name nf_cube
+#' @description create a table crossing tags related to four dimensios
+#' @param news a corpus of news (in qd format) with various columns of tag
+#' @param who the source dimension
+#' @param when the time dimension
+#' @param timespan aggregation of time
+#' @param what the topic dimension defined by a list of tags
+#' @param unique counting each tag only once
+#' @param normalize normalize the weight of tags to have a sum equal of 1 for ech item (TRUE/FALSE)
+
+
+
+nf_cube<-function(      news = corpus,
+                        who = "source",
+                        when = "time",
+                        timespan = "week",
+                        what = "tag_list",
+                        unique = TRUE,
+                        normalize = TRUE)
+  
+{  
+  
+# prepare data
+df<- data.frame(docnames(news), docvars(news)[,c(who,when,what)],stringsAsFactors = F)
+names(df)<-c("id","who","when","what")
+
+# change time span
+df$when<-as.character(cut(as.Date(df$when), timespan, start.on.monday = TRUE))
+
+# unnest what
+df$what<-as.character(df$what)
+df$what[df$what==""]<-"_no_"
+df<-unnest_tokens(df,what,what,to_lower=F)
+
+# correct tags
+if (unique) df<-unique(df)
+
+# normalize
+if (normalize) {
+  x<-as.data.frame(table(df$id))
+  names(x)<-c("id","weight")
+  x$weight<-1/x$weight
+  df<-merge(df,x,by="id")
+} else df$weight<-1
+
+# Aggregate
+cube<-df%>%group_by(who, when,what)%>%summarise(weight=sum(weight))
+
+return (cube)
+}
+```
+
+### application
+```{r}
+cub<-nf_cube(           news = qd_state,
+                        who = "source",
+                        when = "time",
+                        timespan = "week",
+                        what = "state_list",
+                        unique = TRUE,
+                        normalize = TRUE)
+head(cub,5)
+```
+
+
+
+## D.2 Creation of hypercubes (**nf_hypercube**)
+
+Cubes introduce three compulsory dimensions (who,when,where) with a third dimension (what). The dimension when can be adapted by day, week, month, quarter or year
+
+### function
+```{r}
+
+#### ---------------- nf_hypercube ----------------
+#' @title cross four dimensions of news tags
+#' @name nf_hypercube
+#' @description create a table crossing tags related to four dimensios
+#' @param news a corpus of news (in qd format) with various columns of tag
+#' @param who the source dimension
+#' @param when the time dimension
+#' @param timespan aggreation of time
+#' @param what a list of topic 
+#' @param where a list of places
+#' @param unique counting each tag only once
+#' @param normalize normalize the weight of tags to have a sum equal of 1 for ech item (TRUE/FALSE)
+
+
+nf_hypercube<-function( news = corpus,
+                        who = "source",
+                        when = "time",
+                        timespan = "week",
+                        what = "what_list",
+                        where = "where_list",
+                        unique = TRUE,
+                        normalize = TRUE)
+  
+{
+
+  
+  
+# prepare data
+df<- data.frame(docnames(news), docvars(news)[,c(who,when,what,where)],stringsAsFactors = F)
+names(df)<-c("id","who","when","what","where")
+
+# change time span
+df$when<-as.character(cut(as.Date(df$when), timespan, start.on.monday = TRUE))
+
+# unnest what
+df$what<-as.character(df$what)
+df$what[df$what==""]<-"_no_"
+df<-unnest_tokens(df,what,what,to_lower=F)
+
+# unnest where
+df$where[df$where==""]<-"_no_"
+df<-unnest_tokens(df,where,where,to_lower=F)
+
+# correct tags
+if (unique) df<-unique(df)
+
+# normalize
+if (normalize) {
+  x<-as.data.frame(table(df$id))
+  names(x)<-c("id","weight")
+  x$weight<-1/x$weight
+  df<-merge(df,x,by="id")
+} else df$weight<-1
+
+# Aggregate
+hypercube<-df%>%group_by(who, when,what,where)%>%summarise(weight=sum(weight))
+
+# Return result
+
+return (hypercube)
+
+}
+
+
+```
+
+### application
+```{r}
+hcub<-nf_hypercube(     news = qd_state_border,
+                        who = "source",
+                        when = "time",
+                        timespan = "week",
+                        where = "state_list",
+                        what = "border_list",
+                        unique = TRUE,
+                        normalize = TRUE)
+head(hcub,5)
+```
+
+
+## D.3 Creation of pentacubes (**nf_pentacube**)
+
+Cubes introduce three compulsory dimensions (who,when,where) with a third dimension (what). The dimension when can be adapted by day, week, month, quarter or year. the dimension where1 and where2 makepossible to introduce. The dimension where will be duplicated in where1 and where2 in order to visualize networks of co-locations. 
+
+### function
+```{r}
+#### ---------------- nf_pentacube ----------------
+#' @title create a network of interlinked spatial units
+#' @name nf_pentacube
+#' @description create a network of interlinked states
+#' @param news a corpus of news with at less one column of spatial tags
+#' @param who the source dimension
+#' @param when the time dimension
+#' @param timespan aggreation of time
+#' @param what a list of topics
+#' @param where a list of places
+#' @param unique counting each tag only once
+#' @param normalize normalize the weight of tags to have a sum equal of 1 for ech item (TRUE/FALSE)
+
+
+nf_pentacube<-function( news = corpus,
+                        who = "source",
+                        when = "time",
+                        timespan = "week",
+                        what = "what_list",
+                        where = "where_list",
+                        unique = TRUE,
+                        normalize = TRUE)
+{
+
+  
+
+    
+# prepare data
+  df<- data.frame(docnames(news), docvars(news)[,c(who,when,what,where)],stringsAsFactors = F)
+names(df)<-c("id","who","when","what","where1")
+
+
+# change time span
+df$when<-as.character(cut(as.Date(df$when), timespan, start.on.monday = TRUE))
+
+# unnest what
+df$what[df$what==""]<-"_no_"
+df<-unnest_tokens(df,what,what,to_lower=F)
+
+# unnest where
+df$where1[df$where1==""]<-"_no_"
+df$where2<-df$where1
+df<-unnest_tokens(df,where1,where1,to_lower=F)
+df<-unnest_tokens(df,where2,where2,to_lower=F)
+
+# correct tags
+if (unique) df<-unique(df)
+
+# normalize
+if (normalize) {
+  x<-as.data.frame(table(df$id))
+  names(x)<-c("id","weight")
+  x$weight<-1/x$weight
+  df<-merge(df,x,by="id")
+} else df$weight<-1
+
+# Aggregate
+pentacube<-df%>%group_by(who, when,what,where1,where2)%>%summarise(weight=sum(weight))
+
+
+ 
+# export result
+return(pentacube)
+
+}
+
+
+```
+
+### application
+```{r}
+pcub<-nf_pentacube(     news = qd_state_border,
+                        who = "source",
+                        when = "time",
+                        timespan = "week",
+                        where = "state_list",
+                        what = "border_list",
+                        unique = TRUE,
+                        normalize = TRUE)
+head(pcub,5)
+```
+
+
+
